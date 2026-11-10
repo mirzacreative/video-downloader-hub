@@ -22,7 +22,7 @@ const PLATFORMS = {
   tiktok:    { name: "TikTok",    hint: "TikTok links: tiktok.com/@user/video/… or vt.tiktok.com/…", domains: ["tiktok.com", "vt.tiktok.com", "vm.tiktok.com"], wmSupport: true, placeholder: "Paste a TikTok link — e.g. tiktok.com/@user/video/…" },
   instagram: { name: "Instagram", hint: "Instagram links: instagram.com/reel/… or instagram.com/p/…", domains: ["instagram.com"], wmSupport: true, placeholder: "Paste an Instagram link — a Reel, video post or story…" },
   facebook:  { name: "Facebook",  hint: "Facebook links: facebook.com/watch?v=… or fb.watch/…", domains: ["facebook.com", "fb.watch"], wmSupport: true, placeholder: "Paste a Facebook video link — a watch link or fb.watch short link…" },
-  snapchat:  { name: "Snapchat",  hint: "Snapchat links: snapchat.com/spotlight/… — often blocked, may fail.", domains: ["snapchat.com"], wmSupport: true, placeholder: "Paste a Snapchat link — a Spotlight or public story link…" },
+  snapchat:  { name: "Snapchat",  hint: "Snapchat links: snapchat.com/spotlight/… — public Spotlight videos download as MP4, no login needed.", domains: ["snapchat.com"], wmSupport: true, placeholder: "Paste a Snapchat Spotlight link — e.g. snapchat.com/spotlight/…" },
 };
 
 let currentPlatform = "youtube";
