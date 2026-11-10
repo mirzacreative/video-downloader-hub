@@ -171,7 +171,8 @@ app.get("/api/download", rateLimit(10), (req, res) => {
     return res.status(400).json({ error: "Paste a valid video link from YouTube, TikTok, Instagram, Facebook or Snapchat." });
   }
   // Merged pairs look like "298+140" — allow letters, digits, _ - + .
-  if (!/^[A-Za-z0-9_+.\-]+$/.test(formatId) || formatId.length > 40) {
+  // Instagram/Facebook dash IDs run ~45 chars, so the cap is generous.
+  if (!/^[A-Za-z0-9_+.\-]+$/.test(formatId) || formatId.length > 100) {
     return res.status(400).json({ error: "Pick a resolution first." });
   }
   // Resolve the title first (cheap metadata call) so the filename is sane.
