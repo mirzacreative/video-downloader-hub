@@ -7,12 +7,14 @@
 //     data.music = audio track.
 //   - YouTube / Instagram / Facebook / Snapchat: our own API, which
 //     extracts with yt-dlp and streams the chosen format back
-//     (GET <API_BASE>/api/info and /api/download). After the API is
-//     deployed on Render, set API_BASE to its URL, e.g.
-//     "https://video-downloader-hub-api.onrender.com".
-//     Leave it as "" to use the same origin (when frontend + API are
-//     served together).
-const API_BASE = ""; // <-- SET THIS to the Render API URL after deploy
+//     (GET <API_BASE>/api/info and /api/download). The API runs on
+//     SnapDeploy (free tier, card-free):
+//     "https://video-downloader-hub-8f893.containers.snapdeploy.app".
+//     It sleeps after ~15 min idle and wakes on a browser visit —
+//     fetchViaApi retries once after 45 s when it gets a 503 wake page.
+//     Leave API_BASE as "" to use the same origin (when frontend + API
+//     are served together).
+const API_BASE = "https://video-downloader-hub-8f893.containers.snapdeploy.app";
 const TIKWM_API = "https://www.tikwm.com/api/";
 
 const PLATFORMS = {
@@ -177,24 +179,52 @@ async function fetchTikTok(url) {
 
 // ---- YouTube / Instagram / Facebook / Snapchat via our own API -----------
 async function fetchViaApi(url, platform) {
-  const res = await fetch(`${API_BASE}/api/info?url=${encodeURIComponent(url)}`);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Could not fetch this video.");
-  currentFormats = data.formats || [];
-  if (!currentFormats.length) throw new Error("No downloadable formats found for this video.");
-  tikwmMode = false;
-  $("res-thumb").src = data.thumbnail || "";
-  $("res-thumb").alt = data.title || "Video thumbnail";
-  $("res-title").textContent = data.title || "Untitled video";
-  const bits = [];
-  if (data.uploader) bits.push(data.uploader);
-  if (data.duration) bits.push(formatDuration(data.duration));
-  if (data.platform) bits.push(data.platform);
-  $("res-info").textContent = bits.join(" · ");
-  fillFormatSelect(currentFormats.map((f) => ({ value: f.format_id, label: f.label })));
-  updateWmTag();
-  resultEl.hidden = false;
-  setStatus("Video found — pick a resolution and press Download.", "ok");
+  // The free backend sleeps after ~15 min idle; the first call after sleep
+  // gets a 503 wake page (HTML, not JSON) or a network failure. Retry once
+  // after 45 s so the user usually only sees a short "waking up" note.
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${API_BASE}/api/info?url=${encodeURIComponent(url)}`);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        currentFormats = data.formats || [];
+        if (!currentFormats.length) throw new Error("No downloadable formats found for this video.");
+        tikwmMode = false;
+        $("res-thumb").src = data.thumbnail || "";
+        $("res-thumb").alt = data.title || "Video thumbnail";
+        $("res-title").textContent = data.title || "Untitled video";
+        const bits = [];
+        if (data.uploader) bits.push(data.uploader);
+        if (data.duration) bits.push(formatDuration(data.duration));
+        if (data.platform) bits.push(data.platform);
+        $("res-info").textContent = bits.join(" · ");
+        fillFormatSelect(currentFormats.map((f) => ({ value: f.format_id, label: f.label })));
+        updateWmTag();
+        resultEl.hidden = false;
+        setStatus("Video found — pick a resolution and press Download.", "ok");
+        return;
+      }
+      lastErr = new Error(data.error || (res.status === 503
+        ? "The server is waking up. Please try again in a minute."
+        : "Could not fetch this video."));
+      if (res.status === 503 && attempt === 0) {
+        setStatus("Server is waking up — retrying in a moment…");
+        await new Promise((r) => setTimeout(r, 45000));
+        continue;
+      }
+      throw lastErr;
+    } catch (err) {
+      if (err instanceof TypeError && attempt === 0) {
+        lastErr = err;
+        setStatus("Server is waking up — retrying in a moment…");
+        await new Promise((r) => setTimeout(r, 45000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error("Could not fetch this video.");
 }
 
 $("dl-form").addEventListener("submit", async (e) => {
