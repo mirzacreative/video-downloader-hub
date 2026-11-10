@@ -1,0 +1,20 @@
+# Video Downloader Hub — Render Blueprint (free tier).
+# Deploy: in Render, "New +" -> "Blueprint", point it at the repo that
+# contains this file. Render builds the Docker image from server/Dockerfile
+# and runs it as a free web service. The frontend (GitHub Pages) then calls
+# this service's URL — set API_BASE in app.js to it after deploy.
+services:
+  - type: web
+    name: video-downloader-hub-api
+    plan: free
+    runtime: docker
+    rootDir: server
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+      - key: YT_DLP_PATH
+        value: yt-dlp
