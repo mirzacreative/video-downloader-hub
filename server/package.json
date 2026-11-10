@@ -1,0 +1,1 @@
+{"dependencies":{"cors":"^2.8.5","express":"^4.21.2"},"description":"Backend for Video Downloader Hub — fetches video info and streams downloads via yt-dlp.","engines":{"node":">=18"},"license":"MIT","main":"server.js","name":"video-downloader-hub-server","scripts":{"start":"node server.js"},"version":"1.0.0"}
