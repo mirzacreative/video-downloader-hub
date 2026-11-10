@@ -68,11 +68,12 @@ function friendlyError(stderr) {
 function ytDlpArgs(extra) {
   const args = ["--no-playlist", "--no-warnings"];
   // YouTube bot-checks datacenter IPs ("Sign in to confirm you're not a
-  // bot") on its default web player client. The Android player client
-  // uses a different API path and usually returns formats without a
-  // login; fall back to web if it doesn't. youtube:-prefixed args only
-  // apply to YouTube, so other platforms are unaffected.
-  args.push("--extractor-args", "youtube:player_client=android,web");
+  // bot") on its default web player client. Other player clients use
+  // different API paths and usually return formats without a login;
+  // yt-dlp tries them in order and uses the first that works. The
+  // youtube:-prefixed args only apply to YouTube, so other platforms
+  // are unaffected.
+  args.push("--extractor-args", "youtube:player_client=web_safari,android,ios,web");
   if (COOKIES_FILE) args.push("--cookies", COOKIES_FILE);
   return args.concat(extra);
 }
@@ -192,24 +193,33 @@ app.get("/api/download", rateLimit(10), (req, res) => {
       const merged = formatId.includes("+");
       const ext = merged ? "mkv" : (chosen.ext || "mp4");
       const filename = `${safeFilename(info.title)}.${ext}`;
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      res.setHeader("Content-Type", chosen.audioOnly ? "audio/mp4" : (merged ? "video/x-matroska" : "video/mp4"));
       const dlArgs = ["-f", formatId, "-o", "-", "--no-check-certificates"];
       if (merged) dlArgs.push("--merge-output-format", "mkv");
       dlArgs.push(url);
       const child = spawn(YT_DLP, ytDlpArgs(dlArgs), { stdio: ["ignore", "pipe", "pipe"] });
       let stderrBuf = "";
+      let started = false;
       child.stderr.on("data", (d) => { stderrBuf += d.toString(); });
-      child.stdout.pipe(res);
+      // Only send headers + start the response once yt-dlp actually
+      // produces bytes. If it fails first (bot-check, login wall), the
+      // user gets a clear JSON error instead of an empty file.
+      child.stdout.on("data", (chunk) => {
+        if (!started) {
+          started = true;
+          res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+          res.setHeader("Content-Type", chosen.audioOnly ? "audio/mp4" : (merged ? "video/x-matroska" : "video/mp4"));
+        }
+        res.write(chunk);
+      });
       child.on("error", () => {
-        if (!res.headersSent) res.status(502).json({ error: "Download failed. Try again later." });
+        if (!started) res.status(502).json({ error: "Download failed. Try again later." });
         else res.end();
       });
       child.on("close", (code) => {
-        if (code !== 0 && !res.writableEnded) {
-          if (!res.headersSent) res.status(422).json({ error: friendlyError(stderrBuf) });
-          else res.end();
-        }
+        if (!started) {
+          if (code !== 0) res.status(422).json({ error: friendlyError(stderrBuf) });
+          else res.status(502).json({ error: "Download produced no data. Try again later." });
+        } else if (!res.writableEnded) res.end();
       });
       req.on("close", () => { try { child.kill("SIGKILL"); } catch { /* already gone */ } });
     }
