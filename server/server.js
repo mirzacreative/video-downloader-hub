@@ -67,6 +67,12 @@ function friendlyError(stderr) {
 
 function ytDlpArgs(extra) {
   const args = ["--no-playlist", "--no-warnings"];
+  // YouTube bot-checks datacenter IPs ("Sign in to confirm you're not a
+  // bot") on its default web player client. The Android player client
+  // uses a different API path and usually returns formats without a
+  // login; fall back to web if it doesn't. youtube:-prefixed args only
+  // apply to YouTube, so other platforms are unaffected.
+  args.push("--extractor-args", "youtube:player_client=android,web");
   if (COOKIES_FILE) args.push("--cookies", COOKIES_FILE);
   return args.concat(extra);
 }
