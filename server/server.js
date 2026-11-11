@@ -73,9 +73,12 @@ function ytDlpArgs(extra) {
   // different API paths and usually return formats without a login;
   // yt-dlp tries them in order and uses the first that works. The
   // youtube:-prefixed args only apply to YouTube, so other platforms
-  // are unaffected. tv (TVHTML5) added 2026-11-10 — it uses yet
-  // another API path and is the next bypass attempt.
-  args.push("--extractor-args", "youtube:player_client=tv,web_safari,android,ios,web");
+  // are unaffected. Round 2026-11-11: added web_embedded, web_music,
+  // mweb (not tried before) + player_skip=webpage — skipping the watch
+  // page fetch (where the bot-check often triggers) and using only the
+  // Innertube API.
+  args.push("--extractor-args", "youtube:player_client=tv,web_safari,android,ios,web_embedded,web_music,mweb,web");
+  args.push("--extractor-args", "youtube:player_skip=webpage");
   if (COOKIES_FILE) args.push("--cookies", COOKIES_FILE);
   return args.concat(extra);
 }
