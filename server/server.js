@@ -110,7 +110,12 @@ async function fastSaverFetch(path, opts = {}) {
     signal: AbortSignal.timeout(60000),
   });
   const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(data.error || data.message || "FastSaver request failed");
+  if (!data.ok) {
+    // Log the reason (never the key) so a bad key / bad request is
+    // diagnosable from the container logs.
+    console.error("FastSaver failed:", path.split("?")[0], "HTTP", res.status, JSON.stringify(data).slice(0, 300));
+    throw new Error(data.error || data.message || data.detail || "FastSaver request failed");
+  }
   return data;
 }
 
@@ -122,26 +127,31 @@ async function fastSaverYouTubeInfo(url) {
   await fastSaverThrottle();
   const data = await fastSaverFetch(`/youtube/info?url=${encodeURIComponent(url)}`);
   const formats = (data.formats || []).map((f) => {
-    const label = (f.quality || f.label || "").toString();
+    // Quality can live in label ("1080p"), in quality ("1080p" or the
+    // number 1080), or both — check every string form before giving up.
+    const labelText = `${f.label || ""} ${f.quality || ""} ${f.resolution || ""}`;
     let fsFormat = null;
     let audioOnly = false;
-    if (/audio/i.test(label)) {
+    if (/audio/i.test(labelText)) {
       audioOnly = true;
-      fsFormat = /m4a/i.test(label) ? "m4a" : /mp3/i.test(label) ? "mp3" : "audio";
+      fsFormat = /m4a/i.test(labelText) ? "m4a" : /mp3/i.test(labelText) ? "mp3" : "audio";
     } else {
-      const m = label.match(/(\d{3,4}p)/);
-      if (m) fsFormat = m[1];
+      const m = labelText.match(/(\d{3,4})p/i);
+      if (m) fsFormat = m[1] + "p";
     }
     if (!fsFormat) return null;
     return {
       format_id: `fs-${fsFormat}`,
-      label: `${f.label || label}${f.size_readable ? " — " + f.size_readable : ""}`,
+      label: `${f.label || fsFormat}${f.size_readable ? " — " + f.size_readable : ""}`,
       height: audioOnly ? 0 : (parseInt(fsFormat, 10) || 0),
       ext: f.ext || (fsFormat === "mp3" ? "mp3" : fsFormat === "m4a" ? "m4a" : "mp4"),
       audioOnly,
     };
   }).filter(Boolean);
-  if (!formats.length) throw new Error("No FastSaver formats");
+  if (!formats.length) {
+    console.error("FastSaver info: no usable formats. Raw sample:", JSON.stringify((data.formats || []).slice(0, 3)).slice(0, 500));
+    throw new Error("No FastSaver formats");
+  }
   return {
     title: data.title || "Untitled video",
     thumbnail: data.thumbnail || data.thumbnail_url || "",
@@ -405,4 +415,8 @@ app.get("/api/download", rateLimit(10), (req, res) => {
   );
 });
 
-app.listen(PORT, () => console.log(`Video Downloader Hub API listening on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Video Downloader Hub API listening on :${PORT}`);
+  // Presence only — never log the key itself.
+  console.log("FastSaver key:", FASTSAVER_API_KEY ? `set (${FASTSAVER_API_KEY.length} chars)` : "NOT SET");
+});
