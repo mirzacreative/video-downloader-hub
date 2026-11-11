@@ -9,6 +9,7 @@
 const express = require("express");
 const cors = require("cors");
 const { execFile, spawn } = require("child_process");
+const { Readable } = require("stream");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const YT_DLP = process.env.YT_DLP_PATH || "yt-dlp";
@@ -79,6 +80,37 @@ function ytDlpArgs(extra) {
   return args.concat(extra);
 }
 
+// ---- Snapchat (no yt-dlp extractor exists) -------------------------------
+// Public Spotlight pages carry an og:video tag with a direct MP4 URL —
+// verified 2026-11-10 (8.2 MB MP4, no login). Stories and private snaps
+// have no og:video, so they correctly fail here.
+const SNAP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const SNAP_FORMAT_ID = "snapchat-video";
+
+async function fetchSnapchatInfo(url) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": SNAP_UA, Accept: "text/html" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!res.ok) throw new Error("Snapchat page fetch failed");
+  const html = await res.text();
+  const pick = (prop) => {
+    const m = html.match(new RegExp(`<meta\\s+property="${prop}"\\s+content="([^"]+)"`))
+      || html.match(new RegExp(`<meta\\s+content="([^"]+)"\\s+property="${prop}"`));
+    return m ? m[1].replace(/&amp;/g, "&") : "";
+  };
+  const videoUrl = pick("og:video");
+  if (!videoUrl) throw new Error("No video on this Snapchat link");
+  const dur = html.match(/"duration":"PT(\d+)S"/);
+  return {
+    videoUrl,
+    title: pick("og:title") || "Snapchat video",
+    thumbnail: pick("og:image"),
+    duration: dur ? parseInt(dur[1], 10) : null,
+  };
+}
+
 // ---- Format picking -------------------------------------------------------
 function pickFormats(info, platform) {
   const formats = (info.formats || []).filter((f) => f.url);
@@ -141,6 +173,20 @@ app.get("/api/info", rateLimit(20), (req, res) => {
   if (!url || !platform) {
     return res.status(400).json({ error: "Paste a valid video link from YouTube, TikTok, Instagram, Facebook or Snapchat." });
   }
+  if (platform === "Snapchat") {
+    fetchSnapchatInfo(url).then((snap) => {
+      res.json({
+        title: snap.title,
+        thumbnail: snap.thumbnail,
+        duration: snap.duration,
+        uploader: "",
+        platform,
+        watermark_free: true,
+        formats: [{ format_id: SNAP_FORMAT_ID, label: "Video (MP4)", height: 0, ext: "mp4" }],
+      });
+    }).catch(() => res.status(422).json({ error: "Snapchat could not read this link. Only public Spotlight videos work — private snaps and stories cannot be downloaded." }));
+    return;
+  }
   execFile(
     YT_DLP,
     ytDlpArgs(["-J", "--no-check-certificates", url]),
@@ -175,6 +221,27 @@ app.get("/api/download", rateLimit(10), (req, res) => {
   // Instagram/Facebook dash IDs run ~45 chars, so the cap is generous.
   if (!/^[A-Za-z0-9_+.\-]+$/.test(formatId) || formatId.length > 100) {
     return res.status(400).json({ error: "Pick a resolution first." });
+  }
+  if (platform === "Snapchat") {
+    if (formatId !== SNAP_FORMAT_ID) return res.status(400).json({ error: "Pick a resolution first." });
+    fetchSnapchatInfo(url).then(async (snap) => {
+      try {
+        const up = await fetch(snap.videoUrl, {
+          headers: { "User-Agent": SNAP_UA },
+          redirect: "follow",
+          signal: AbortSignal.timeout(90000),
+        });
+        if (!up.ok || !up.body) return res.status(502).json({ error: "Snapchat download failed. Try again later." });
+        res.setHeader("Content-Disposition", `attachment; filename="${safeFilename(snap.title)}.mp4"`);
+        res.setHeader("Content-Type", "video/mp4");
+        Readable.fromWeb(up.body).pipe(res);
+      } catch {
+        if (!res.headersSent) res.status(502).json({ error: "Snapchat download failed. Try again later." });
+      }
+    }).catch(() => {
+      if (!res.headersSent) res.status(422).json({ error: "Snapchat could not read this link. Only public Spotlight videos work." });
+    });
+    return;
   }
   // Resolve the title first (cheap metadata call) so the filename is sane.
   execFile(
