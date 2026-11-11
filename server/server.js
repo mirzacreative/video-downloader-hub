@@ -15,6 +15,14 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 const YT_DLP = process.env.YT_DLP_PATH || "yt-dlp";
 const COOKIES_FILE = process.env.COOKIES_FILE || "";
 const INFO_TIMEOUT_MS = parseInt(process.env.INFO_TIMEOUT_MS || "60000", 10);
+// FastSaverAPI (free tier: 1,000 credits, no card) — YouTube fallback only.
+// Set on the SnapDeploy container as FASTSAVER_API_KEY; the key is never
+// committed to the repo. Free-plan costs: YouTube info 2 credits,
+// YouTube download 15 credits (1080p and below) — about 66 downloads
+// per 1,000 credits. yt-dlp stays the first try for YouTube (free when
+// it works); FastSaver runs only when yt-dlp is bot-blocked.
+const FASTSAVER_API_KEY = process.env.FASTSAVER_API_KEY || "";
+const FASTSAVER_BASE = "https://api.fastsaver.io/v1";
 
 const app = express();
 app.use(cors());
@@ -81,6 +89,68 @@ function ytDlpArgs(extra) {
   args.push("--extractor-args", "youtube:player_skip=webpage");
   if (COOKIES_FILE) args.push("--cookies", COOKIES_FILE);
   return args.concat(extra);
+}
+
+// ---- FastSaverAPI (YouTube fallback) --------------------------------------
+// Free plan allows 10 requests/min per key, so space calls out (6 s gap)
+// to avoid 429s from a burst of visitors. Docs: read the `ok` field,
+// not the status code; a failed call costs 0.1 credits.
+let lastFastSaverCall = 0;
+async function fastSaverThrottle() {
+  const now = Date.now();
+  const wait = 6000 - (now - lastFastSaverCall);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastFastSaverCall = Date.now();
+}
+
+async function fastSaverFetch(path, opts = {}) {
+  const res = await fetch(FASTSAVER_BASE + path, {
+    ...opts,
+    headers: { "X-Api-Key": FASTSAVER_API_KEY, "Content-Type": "application/json", ...(opts.headers || {}) },
+    signal: AbortSignal.timeout(60000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) throw new Error(data.error || data.message || "FastSaver request failed");
+  return data;
+}
+
+// YouTube info via FastSaver, mapped to our /api/info shape. Format ids
+// are "fs-<quality>" (e.g. fs-1080p, fs-mp3) so /api/download can tell
+// them apart from yt-dlp ids; the download endpoint takes the quality,
+// not FastSaver's own format_id.
+async function fastSaverYouTubeInfo(url) {
+  await fastSaverThrottle();
+  const data = await fastSaverFetch(`/youtube/info?url=${encodeURIComponent(url)}`);
+  const formats = (data.formats || []).map((f) => {
+    const label = (f.quality || f.label || "").toString();
+    let fsFormat = null;
+    let audioOnly = false;
+    if (/audio/i.test(label)) {
+      audioOnly = true;
+      fsFormat = /m4a/i.test(label) ? "m4a" : /mp3/i.test(label) ? "mp3" : "audio";
+    } else {
+      const m = label.match(/(\d{3,4}p)/);
+      if (m) fsFormat = m[1];
+    }
+    if (!fsFormat) return null;
+    return {
+      format_id: `fs-${fsFormat}`,
+      label: `${f.label || label}${f.size_readable ? " — " + f.size_readable : ""}`,
+      height: audioOnly ? 0 : (parseInt(fsFormat, 10) || 0),
+      ext: f.ext || (fsFormat === "mp3" ? "mp3" : fsFormat === "m4a" ? "m4a" : "mp4"),
+      audioOnly,
+    };
+  }).filter(Boolean);
+  if (!formats.length) throw new Error("No FastSaver formats");
+  return {
+    title: data.title || "Untitled video",
+    thumbnail: data.thumbnail || data.thumbnail_url || "",
+    duration: data.duration || null,
+    uploader: data.channel || "",
+    platform: "YouTube",
+    watermark_free: false,
+    formats,
+  };
 }
 
 // ---- Snapchat (no yt-dlp extractor exists) -------------------------------
@@ -195,11 +265,29 @@ app.get("/api/info", rateLimit(20), (req, res) => {
     ytDlpArgs(["-J", "--no-check-certificates", url]),
     { timeout: INFO_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 },
     (err, stdout, stderr) => {
-      if (err) return res.status(422).json({ error: friendlyError(stderr || err.message) });
+      if (err) {
+        // yt-dlp is bot-blocked for YouTube on this host. Fall back to
+        // FastSaverAPI (2 credits) instead of failing the user outright.
+        if (platform === "YouTube" && FASTSAVER_API_KEY) {
+          fastSaverYouTubeInfo(url)
+            .then((fsInfo) => res.json(fsInfo))
+            .catch(() => res.status(422).json({ error: "YouTube downloads are temporarily unavailable. Please try again in a few minutes." }));
+          return;
+        }
+        return res.status(422).json({ error: friendlyError(stderr || err.message) });
+      }
       let info;
       try { info = JSON.parse(stdout); } catch { return res.status(502).json({ error: "The video service returned an unreadable response. Try again later." }); }
       const { formats, watermarkFree } = pickFormats(info, platform);
-      if (!formats.length) return res.status(422).json({ error: "No downloadable formats found for this video." });
+      if (!formats.length) {
+        if (platform === "YouTube" && FASTSAVER_API_KEY) {
+          fastSaverYouTubeInfo(url)
+            .then((fsInfo) => res.json(fsInfo))
+            .catch(() => res.status(422).json({ error: "No downloadable formats found for this video." }));
+          return;
+        }
+        return res.status(422).json({ error: "No downloadable formats found for this video." });
+      }
       res.json({
         title: info.title || "Untitled video",
         thumbnail: info.thumbnail || "",
@@ -224,6 +312,25 @@ app.get("/api/download", rateLimit(10), (req, res) => {
   // Instagram/Facebook dash IDs run ~45 chars, so the cap is generous.
   if (!/^[A-Za-z0-9_+.\-]+$/.test(formatId) || formatId.length > 100) {
     return res.status(400).json({ error: "Pick a resolution first." });
+  }
+  // FastSaver-backed YouTube formats (fs-1080p, fs-mp3, ...). FastSaver
+  // returns a signed tunnel link (expires in 5 min, max 3 opens) and its
+  // docs say to hand it straight to the user's browser — so redirect
+  // instead of proxying. Each call costs 15 credits (free tier: 1,000).
+  if (formatId.startsWith("fs-")) {
+    if (platform !== "YouTube" || !/^fs-(audio|mp3|m4a|\d{3,4}p)$/.test(formatId) || !FASTSAVER_API_KEY) {
+      return res.status(422).json({ error: "YouTube downloads are temporarily unavailable. Please try again in a few minutes." });
+    }
+    fastSaverThrottle()
+      .then(() => fastSaverFetch("/youtube/download", { method: "POST", body: JSON.stringify({ url, format: formatId.slice(3) }) }))
+      .then((data) => {
+        if (!data.download_url) throw new Error("No download link");
+        res.redirect(302, data.download_url);
+      })
+      .catch(() => {
+        if (!res.headersSent) res.status(422).json({ error: "YouTube download failed. Please try again in a few minutes." });
+      });
+    return;
   }
   if (platform === "Snapchat") {
     if (formatId !== SNAP_FORMAT_ID) return res.status(400).json({ error: "Pick a resolution first." });
