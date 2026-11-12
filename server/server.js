@@ -129,10 +129,14 @@ async function fastSaverYouTubeInfo(url) {
   const formats = (data.formats || []).map((f) => {
     // Quality can live in label ("1080p"), in quality ("1080p" or the
     // number 1080), or both — check every string form before giving up.
-    const labelText = `${f.label || ""} ${f.quality || ""} ${f.resolution || ""}`;
+    // Real response shape (seen in live logs 2026-11-11 23:10 PKT):
+    // {"type":"video","format":"144p","filesize":14595389} — the quality
+    // lives in `format`, NOT in label/quality/resolution as the docs
+    // suggested. filesize is in bytes.
+    const labelText = `${f.label || ""} ${f.quality || ""} ${f.resolution || ""} ${f.format || ""}`;
     let fsFormat = null;
     let audioOnly = false;
-    if (/audio/i.test(labelText)) {
+    if (f.type === "audio" || /audio/i.test(labelText)) {
       audioOnly = true;
       fsFormat = /m4a/i.test(labelText) ? "m4a" : /mp3/i.test(labelText) ? "mp3" : "audio";
     } else {
@@ -140,9 +144,11 @@ async function fastSaverYouTubeInfo(url) {
       if (m) fsFormat = m[1] + "p";
     }
     if (!fsFormat) return null;
+    const sizeText = f.size_readable
+      || (typeof f.filesize === "number" && f.filesize > 0 ? " — " + Math.round(f.filesize / 1048576) + " MB" : "");
     return {
       format_id: `fs-${fsFormat}`,
-      label: `${f.label || fsFormat}${f.size_readable ? " — " + f.size_readable : ""}`,
+      label: `${f.label || f.format || fsFormat}${sizeText}`,
       height: audioOnly ? 0 : (parseInt(fsFormat, 10) || 0),
       ext: f.ext || (fsFormat === "mp3" ? "mp3" : fsFormat === "m4a" ? "m4a" : "mp4"),
       audioOnly,
